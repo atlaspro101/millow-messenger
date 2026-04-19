@@ -7,69 +7,92 @@ const socketio = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
-require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
-const io = socketio(server, {
-  cors: {
-    origin: "http://localhost:5173",
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE"]
-  }
-});
 
+// Настройка CORS для продакшена
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5000',
-  'https://millow-client.onrender.com',
-  'https://millow-server.onrender.com'
+  'https://atlaspro101.github.io',
+  'https://millow-api.onrender.com',
+  'https://millow-messenger.vercel.app',
+  /\.railway\.app$/,
+  /\.glitch\.me$/
 ];
 
 app.use(cors({
   origin: function(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || allowedOrigins.some(allowed => {
+      if (allowed instanceof RegExp) {
+        return allowed.test(origin);
+      }
+      return allowed === origin;
+    })) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      console.log('Blocked by CORS:', origin);
+      callback(null, true); // Временно разрешаем все для отладки
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Middleware
-app.use(cors({
-  origin: "http://localhost:5173",
-  credentials: true
-}));
-app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Socket.io с CORS
+const io = socketio(server, {
+  cors: {
+    origin: true,
+    credentials: true,
+    methods: ["GET", "POST"]
+  }
+});
+
+// Определяем пути для файлов
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads', 'avatars');
+
+// Создаем директории если их нет
+try {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  }
+} catch (err) {
+  console.log('Using in-memory storage (no file system access)');
+}
 
 // Пути к файлам данных
-const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHATS_FILE = path.join(DATA_DIR, 'chats.json');
 const MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
 
-// Создаем папки
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-if (!fs.existsSync(path.join(__dirname, 'uploads', 'avatars'))) {
-  fs.mkdirSync(path.join(__dirname, 'uploads', 'avatars'), { recursive: true });
-}
+// In-memory storage (запасной вариант)
+let memoryUsers = [];
+let memoryChats = [];
+let memoryMessages = [];
 
-// Функции для работы с файлами
-const readJSON = (filePath) => {
+// Функции для работы с данными
+const readJSON = (filePath, defaultValue = []) => {
   try {
     if (fs.existsSync(filePath)) {
       const data = fs.readFileSync(filePath, 'utf8');
       return JSON.parse(data);
     }
-    return [];
+    return defaultValue;
   } catch (error) {
-    console.error(`Error reading ${filePath}:`, error);
-    return [];
+    console.error(`Error reading ${filePath}, using memory storage`);
+    if (filePath === USERS_FILE) return memoryUsers;
+    if (filePath === CHATS_FILE) return memoryChats;
+    if (filePath === MESSAGES_FILE) return memoryMessages;
+    return defaultValue;
   }
 };
 
@@ -78,20 +101,57 @@ const writeJSON = (filePath, data) => {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
     return true;
   } catch (error) {
-    console.error(`Error writing ${filePath}:`, error);
+    console.error(`Error writing ${filePath}, using memory storage`);
+    if (filePath === USERS_FILE) memoryUsers = data;
+    if (filePath === CHATS_FILE) memoryChats = data;
+    if (filePath === MESSAGES_FILE) memoryMessages = data;
     return false;
   }
 };
+
+// Статические файлы
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Настройка multer для загрузки аватарок
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    try {
+      if (!fs.existsSync(UPLOADS_DIR)) {
+        fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+      }
+      cb(null, UPLOADS_DIR);
+    } catch (err) {
+      cb(err, null);
+    }
+  },
+  filename: (req, file, cb) => {
+    const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname);
+    cb(null, uniqueName);
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only images are allowed'), false);
+    }
+  }
+});
 
 // Инициализация файлов
 if (!fs.existsSync(USERS_FILE)) writeJSON(USERS_FILE, []);
 if (!fs.existsSync(CHATS_FILE)) writeJSON(CHATS_FILE, []);
 if (!fs.existsSync(MESSAGES_FILE)) writeJSON(MESSAGES_FILE, []);
 
+console.log('📁 Server started');
 console.log('📁 Data directory:', DATA_DIR);
-console.log('📁 Users file exists:', fs.existsSync(USERS_FILE));
+console.log('📁 Uploads directory:', UPLOADS_DIR);
 
-// Socket.io
+// Socket.io - онлайн пользователи
 const onlineUsers = new Map();
 
 io.on('connection', (socket) => {
@@ -107,6 +167,7 @@ io.on('connection', (socket) => {
     const userIndex = users.findIndex(u => u.id === userId);
     if (userIndex !== -1) {
       users[userIndex].online = true;
+      users[userIndex].lastSeen = new Date().toISOString();
       writeJSON(USERS_FILE, users);
       console.log(`✅ User ${users[userIndex].name} is online`);
     }
@@ -115,7 +176,7 @@ io.on('connection', (socket) => {
   });
   
   socket.on('private-message', (data) => {
-    console.log('💬 New message:', data.content);
+    console.log('💬 New message from', data.senderId);
     
     const messages = readJSON(MESSAGES_FILE);
     const chats = readJSON(CHATS_FILE);
@@ -142,25 +203,39 @@ io.on('connection', (socket) => {
     }
     
     const chat = chats[chatIndex];
-    const recipientId = chat.participants.find(p => p !== data.senderId);
-    const recipientSocket = onlineUsers.get(recipientId);
-    
-    const sender = users.find(u => u.id === data.senderId);
-    
-    const messageWithSender = {
-      ...message,
-      sender: sender ? {
-        id: sender.id,
-        name: sender.name,
-        avatar: sender.avatar
-      } : null
-    };
-    
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('private-message', messageWithSender);
+    if (chat) {
+      const recipientId = chat.participants.find(p => p !== data.senderId);
+      const recipientSocket = onlineUsers.get(recipientId);
+      
+      const sender = users.find(u => u.id === data.senderId);
+      
+      const messageWithSender = {
+        ...message,
+        sender: sender ? {
+          id: sender.id,
+          name: sender.name,
+          avatar: sender.avatar
+        } : null
+      };
+      
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('private-message', messageWithSender);
+      }
+      
+      socket.emit('private-message', messageWithSender);
     }
-    
-    socket.emit('private-message', messageWithSender);
+  });
+  
+  socket.on('typing', (data) => {
+    const chats = readJSON(CHATS_FILE);
+    const chat = chats.find(c => c.id === data.chatId);
+    if (chat) {
+      const recipientId = chat.participants.find(p => p !== data.userId);
+      const recipientSocket = onlineUsers.get(recipientId);
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('typing', data);
+      }
+    }
   });
   
   socket.on('disconnect', () => {
@@ -181,9 +256,15 @@ io.on('connection', (socket) => {
   });
 });
 
-// Routes
+// ============ API Routes ============
+
+// Health check
 app.get('/', (req, res) => {
-  res.json({ message: 'Millow Server is running! 🚀', timestamp: new Date().toISOString() });
+  res.json({ 
+    message: 'Millow Server is running! 🚀',
+    timestamp: new Date().toISOString(),
+    status: 'healthy'
+  });
 });
 
 // Test route
@@ -192,7 +273,7 @@ app.get('/api/test', (req, res) => {
   res.json({ 
     message: 'API is working!', 
     usersCount: users.length,
-    dataDir: DATA_DIR 
+    onlineUsers: onlineUsers.size
   });
 });
 
@@ -230,11 +311,7 @@ app.post('/api/auth/register', async (req, res) => {
     };
     
     users.push(user);
-    const saved = writeJSON(USERS_FILE, users);
-    
-    if (!saved) {
-      return res.status(500).json({ error: 'Failed to save user' });
-    }
+    writeJSON(USERS_FILE, users);
     
     console.log('✅ User registered:', email);
     
@@ -252,7 +329,7 @@ app.post('/api/auth/register', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Register error:', error);
-    res.status(500).json({ error: 'Registration failed: ' + error.message });
+    res.status(500).json({ error: 'Registration failed' });
   }
 });
 
@@ -297,7 +374,7 @@ app.post('/api/auth/login', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Login error:', error);
-    res.status(500).json({ error: 'Login failed: ' + error.message });
+    res.status(500).json({ error: 'Login failed' });
   }
 });
 
@@ -342,7 +419,7 @@ app.get('/api/chats', (req, res) => {
     const users = readJSON(USERS_FILE);
     
     const userChats = chats
-      .filter(c => c.participants.includes(currentUserId))
+      .filter(c => c.participants && c.participants.includes(currentUserId))
       .map(chat => {
         const otherUserId = chat.participants.find(p => p !== currentUserId);
         const otherUser = users.find(u => u.id === otherUserId);
@@ -358,7 +435,7 @@ app.get('/api/chats', (req, res) => {
           } : null
         };
       })
-      .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
     
     res.json(userChats);
   } catch (error) {
@@ -383,6 +460,7 @@ app.post('/api/chats', (req, res) => {
     const users = readJSON(USERS_FILE);
     
     let chat = chats.find(c => 
+      c.participants && 
       c.participants.includes(currentUserId) && 
       c.participants.includes(participantId) &&
       !c.isGroup
@@ -402,11 +480,11 @@ app.post('/api/chats', (req, res) => {
     }
     
     const otherUser = users.find(u => u.id === participantId);
-    const { password, ...otherUserWithoutPassword } = otherUser;
+    const { password, ...otherUserWithoutPassword } = otherUser || {};
     
     res.json({
       ...chat,
-      otherUser: otherUserWithoutPassword
+      otherUser: otherUserWithoutPassword || null
     });
   } catch (error) {
     console.error('❌ Create chat error:', error);
@@ -487,31 +565,6 @@ app.put('/api/users/profile', async (req, res) => {
 });
 
 // Upload avatar
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, 'uploads', 'avatars');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname);
-    cb(null, uniqueName);
-  }
-});
-const upload = multer({ 
-  storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only images are allowed'));
-    }
-  }
-});
-
 app.post('/api/users/avatar', upload.single('avatar'), (req, res) => {
   console.log('📸 Avatar upload attempt');
   
@@ -528,7 +581,9 @@ app.post('/api/users/avatar', upload.single('avatar'), (req, res) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
     
-    const avatarUrl = `http://localhost:5000/uploads/avatars/${req.file.filename}`;
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    const avatarUrl = `${protocol}://${host}/uploads/avatars/${req.file.filename}`;
     
     const users = readJSON(USERS_FILE);
     const userIndex = users.findIndex(u => u.id === userId);
@@ -546,13 +601,19 @@ app.post('/api/users/avatar', upload.single('avatar'), (req, res) => {
   }
 });
 
+// Запуск сервера
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`\n✅ Server running on http://localhost:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n✅ Server running on port ${PORT}`);
   console.log(`📁 Data directory: ${DATA_DIR}`);
-  console.log(`📁 Users file: ${USERS_FILE}`);
-  console.log(`\n📝 Test endpoints:`);
-  console.log(`   GET  http://localhost:${PORT}/api/test`);
-  console.log(`   POST http://localhost:${PORT}/api/auth/register`);
-  console.log(`   POST http://localhost:${PORT}/api/auth/login\n`);
+  console.log(`📁 Uploads directory: ${UPLOADS_DIR}`);
+  console.log(`\n📝 API endpoints:`);
+  console.log(`   POST /api/auth/register - Register`);
+  console.log(`   POST /api/auth/login - Login`);
+  console.log(`   GET /api/users - Get all users`);
+  console.log(`   GET /api/chats - Get user chats`);
+  console.log(`   POST /api/chats - Create chat`);
+  console.log(`   GET /api/messages/:chatId - Get messages`);
+  console.log(`   PUT /api/users/profile - Update profile`);
+  console.log(`   POST /api/users/avatar - Upload avatar\n`);
 });

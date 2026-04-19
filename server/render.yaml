@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: millow-api
+    env: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 18.18.0
+      - key: PORT
+        value: 10000
+      - key: JWT_SECRET
+        value: millow_secret_key_2024_atlaspro101
+      - key: CLIENT_URL
+        value: https://atlaspro101.github.io
