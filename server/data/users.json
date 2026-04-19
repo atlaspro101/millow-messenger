@@ -1,0 +1,26 @@
+[
+  {
+    "id": "1776617872733zup3atcql",
+    "name": "TARAN",
+    "email": "yarike.dolzhenko.01@gmail.com",
+    "password": "$2a$10$37/7a9ZVnRW1CLK7sG9mduWK5SJJ5rVncnvEElby2kPShhnXhu7Fu",
+    "avatar": "http://localhost:5000/uploads/avatars/1776617890627-777974539.ico",
+    "bio": "Админ,первый создатель)",
+    "phone": "+79155843012",
+    "online": true,
+    "lastSeen": "2026-04-19T16:57:52.733Z",
+    "createdAt": "2026-04-19T16:57:52.733Z"
+  },
+  {
+    "id": "1776617925792ryw8fjhvr",
+    "name": "admin",
+    "email": "admin@gmail.com",
+    "password": "$2a$10$XlrmQSD1CerRlOCRSbLElOZtUxBJYBqONl3gio3k2Tnqro0PT9s6.",
+    "avatar": "https://ui-avatars.com/api/?name=admin&background=8B5CF6&color=fff&size=200",
+    "bio": "Hey there! I am using Millow",
+    "phone": "",
+    "online": true,
+    "lastSeen": "2026-04-19T16:58:45.792Z",
+    "createdAt": "2026-04-19T16:58:45.792Z"
+  }
+]

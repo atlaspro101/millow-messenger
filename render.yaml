@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: millow-server
+    env: node
+    buildCommand: cd server && npm install
+    startCommand: cd server && node server.js
+    envVars:
+      - key: PORT
+        value: 5000
+      - key: JWT_SECRET
+        value: millow_super_secret_key_2024_change_this
+      - key: CLIENT_URL
+        value: https://millow-client.onrender.com
+
+  - type: web
+    name: millow-client
+    env: node
+    buildCommand: cd client && npm install && npm run build
+    startCommand: cd client && npx serve -s dist -l 5173
+    envVars:
+      - key: VITE_API_URL
+        value: https://millow-server.onrender.com

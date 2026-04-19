@@ -1,0 +1,38 @@
+[
+  {
+    "id": "1776617933230bsdsocdv3",
+    "chatId": "1776617928989aw86yri3c",
+    "senderId": "1776617925792ryw8fjhvr",
+    "content": "привет",
+    "type": "text",
+    "timestamp": "2026-04-19T16:58:53.230Z",
+    "read": false
+  },
+  {
+    "id": "1776617949929drn2q6pmj",
+    "chatId": "1776617928989aw86yri3c",
+    "senderId": "1776617872733zup3atcql",
+    "content": "привет",
+    "type": "text",
+    "timestamp": "2026-04-19T16:59:09.929Z",
+    "read": false
+  },
+  {
+    "id": "17766182623496f5qrmjto",
+    "chatId": "1776617928989aw86yri3c",
+    "senderId": "1776617872733zup3atcql",
+    "content": "васап",
+    "type": "text",
+    "timestamp": "2026-04-19T17:04:22.349Z",
+    "read": false
+  },
+  {
+    "id": "17766183684288gf5gb980",
+    "chatId": "1776617928989aw86yri3c",
+    "senderId": "1776617872733zup3atcql",
+    "content": "сап",
+    "type": "text",
+    "timestamp": "2026-04-19T17:06:08.428Z",
+    "read": false
+  }
+]
