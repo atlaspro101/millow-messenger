@@ -1,384 +1,660 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Header, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import os
 import uuid
-import sys
-import traceback
-
-# Настройка логирования
-import logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import hashlib
 
 app = FastAPI(title="Millow Messenger")
 
 # CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Конфигурация
-SECRET_KEY = os.getenv("JWT_SECRET", "millow_secret_key_2024")
-ALGORITHM = "HS256"
+# Папки
+for d in ["data", "uploads", "uploads/avatars"]:
+    os.makedirs(d, exist_ok=True)
 
-# Проверка bcrypt
-try:
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-    # Тест хеширования
-    test_hash = pwd_context.hash("test")
-    logger.info("✅ Bcrypt working")
-except Exception as e:
-    logger.error(f"❌ Bcrypt error: {e}")
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-# Создание папок
-for directory in ["data", "uploads", "uploads/avatars", "static"]:
-    os.makedirs(directory, exist_ok=True)
-    logger.info(f"📁 Directory ready: {directory}")
-
-# Загрузка или создание файлов данных
-def load_json(filename, default={}):
-    filepath = f"data/{filename}.json"
-    try:
-        if os.path.exists(filepath):
-            with open(filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading {filename}: {e}")
-    
-    # Создаем файл если не существует
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(default, f, indent=2)
-    return default
-
-def save_json(filename, data):
-    try:
-        filepath = f"data/{filename}.json"
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, default=str)
-        return True
-    except Exception as e:
-        logger.error(f"Error saving {filename}: {e}")
-        return False
-
-# Инициализация данных
-users_db = load_json("users", {})
-chats_db = load_json("chats", {})
-messages_db = load_json("messages", [])
+# ============ ДАННЫЕ ============
+SECRET_KEY = "millow_secret_2024"
+users_db = {}
+chats_db = {}
+messages_db = []
 online_users = {}
+tokens = {}
 
-logger.info(f"📊 Loaded: {len(users_db)} users, {len(chats_db)} chats, {len(messages_db)} messages")
+def hash_password(password):
+    return hashlib.sha256((password + SECRET_KEY).encode()).hexdigest()
 
-# Монтирование статических файлов
-try:
-    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-    app.mount("/static", StaticFiles(directory="static"), name="static")
-except Exception as e:
-    logger.error(f"Error mounting static files: {e}")
+def create_token(user_id):
+    token = str(uuid.uuid4())
+    tokens[token] = {"user_id": user_id}
+    return token
 
-# ============ Функции для работы с файлами ============
+def verify_token(token):
+    return tokens.get(token)
 
-def load_data(filename):
-    """Загрузка данных из JSON файла"""
-    try:
-        filepath = f"data/{filename}.json"
-        if os.path.exists(filepath):
-            with open(filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {} if filename in ["users", "chats"] else []
-    except Exception as e:
-        logger.error(f"Error loading {filename}: {e}")
-        return {} if filename in ["users", "chats"] else []
+# Стартовые аккаунты
+def create_startup_accounts():
+    if len(users_db) == 0:
+        users_db["startup_1"] = {
+            "id": "startup_1", "name": "TARAN", "email": "taran@millow.com",
+            "password": hash_password("fastyk26tyr"),
+            "avatar": "https://ui-avatars.com/api/?name=TARAN&background=8B5CF6&color=fff&size=200&bold=true",
+            "bio": "Hey there! I'm using Millow 💜", "phone": "", "online": False,
+            "lastSeen": datetime.utcnow().isoformat(), "createdAt": datetime.utcnow().isoformat()
+        }
+        users_db["startup_2"] = {
+            "id": "startup_2", "name": "Test", "email": "test@millow.com",
+            "password": hash_password("test123"),
+            "avatar": "https://ui-avatars.com/api/?name=TEST&background=EC4899&color=fff&size=200&bold=true",
+            "bio": "Just testing Millow messenger", "phone": "", "online": False,
+            "lastSeen": datetime.utcnow().isoformat(), "createdAt": datetime.utcnow().isoformat()
+        }
+        print("✅ Startup accounts: TARAN / Test")
 
-def save_data(filename, data):
-    """Сохранение данных в JSON файл"""
-    try:
-        filepath = f"data/{filename}.json"
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, default=str)
-        return True
-    except Exception as e:
-        logger.error(f"Error saving {filename}: {e}")
-        return False
+create_startup_accounts()
 
-# Текущие данные в памяти
-users_db = load_data("users")
-chats_db = load_data("chats")
-messages_db = load_data("messages")
-online_users = {}
-
-# ============ Модели данных ============
-
+# Модели
 class UserRegister(BaseModel):
-    name: str
-    email: str
-    password: str
+    name: str; email: str; password: str
 
 class UserLogin(BaseModel):
-    email: str
-    password: str
-
-class UserUpdate(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    bio: Optional[str] = None
-    phone: Optional[str] = None
-    avatar: Optional[str] = None
+    email: str; password: str
 
 class ChatCreate(BaseModel):
     participantId: str
 
-# ============ JWT функции ============
+class UserUpdate(BaseModel):
+    name: Optional[str] = None; email: Optional[str] = None; bio: Optional[str] = None
+    phone: Optional[str] = None; avatar: Optional[str] = None
 
-def create_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=30)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def verify_token(token: str):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except JWTError:
-        return None
-
-def get_current_user(authorization: str = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="No token provided")
-    payload = verify_token(authorization.split(" ")[1])
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return payload
-
-# ============ HTML СТРАНИЦА ============
-
+# ============ HTML ============
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Millow Messenger</title>
     <style>
-        *{margin:0;padding:0;box-sizing:border-box}
-        body{
-            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-            background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);
-            min-height:100vh;display:flex;align-items:center;justify-content:center;
-            color:#fff;padding:20px
+        :root {
+            --bg: #0f0c29;
+            --glass: rgba(31, 41, 55, 0.4);
+            --glass2: rgba(55, 65, 81, 0.3);
+            --border: rgba(255, 255, 255, 0.08);
+            --accent: #8b5cf6;
+            --accent2: #ec4899;
+            --text: #fff;
+            --text2: #9ca3af;
         }
-        .container{max-width:1000px;width:100%}
-        .header{text-align:center;margin-bottom:30px}
-        .header h1{font-size:48px;background:linear-gradient(135deg,#8b5cf6,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-        .status{color:#10b981;font-size:14px;margin-top:10px}
-        .card{
-            background:rgba(31,41,55,0.7);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
-            border-radius:20px;padding:30px;margin-bottom:20px;border:1px solid rgba(255,255,255,0.1);
-            box-shadow:0 20px 40px rgba(0,0,0,0.3)
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            overflow-x: hidden;
+            position: relative;
         }
-        input,textarea,select{
-            width:100%;padding:14px 18px;margin:8px 0;
-            background:rgba(55,65,81,0.6);border:2px solid rgba(255,255,255,0.1);
-            border-radius:14px;color:#fff;font-size:15px;outline:none;
-            transition:all 0.3s
+
+        /* Анимированный фон */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: 
+                radial-gradient(circle at 20% 50%, rgba(139, 92, 246, 0.15), transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(236, 72, 153, 0.1), transparent 50%),
+                radial-gradient(circle at 40% 20%, rgba(139, 92, 246, 0.1), transparent 50%);
+            animation: bgMove 20s ease infinite;
+            z-index: 0;
+            pointer-events: none;
         }
-        input:focus,textarea:focus{
-            border-color:#8b5cf6;box-shadow:0 0 0 3px rgba(139,92,246,0.2)
+
+        @keyframes bgMove {
+            0%, 100% { opacity: 0.5; }
+            50% { opacity: 1; }
         }
-        button{
-            padding:12px 24px;background:linear-gradient(135deg,#8b5cf6,#7c3aed);
-            border:none;border-radius:50px;color:#fff;font-weight:600;cursor:pointer;
-            margin:4px;transition:all 0.3s;font-size:14px
+
+        /* Стеклянные эффекты */
+        .glass {
+            background: rgba(31, 41, 55, 0.3);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
         }
-        button:hover{transform:translateY(-2px);box-shadow:0 8px 25px rgba(139,92,246,0.4)}
-        button.secondary{background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2)}
-        button.danger{background:linear-gradient(135deg,#ef4444,#dc2626)}
-        .flex{display:flex}.gap-2{gap:10px}.flex-wrap{flex-wrap:wrap}
-        .justify-between{justify-content:space-between}
-        .items-center{align-items:center}
-        .hidden{display:none!important}
-        .mt-2{margin-top:10px}.mt-4{margin-top:20px}.mb-2{margin-bottom:10px}
-        .text-center{text-align:center}.text-sm{font-size:14px}
-        .text-gray{color:#9ca3af}.text-green{color:#10b981}.text-red{color:#ef4444}
-        .avatar{width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid rgba(139,92,246,0.5)}
-        .avatar-lg{width:100px;height:100px;border-radius:50%;object-fit:cover;border:3px solid #8b5cf6}
-        .user-item{
-            display:flex;align-items:center;gap:12px;padding:12px;
-            background:rgba(55,65,81,0.3);border-radius:14px;cursor:pointer;
-            margin:6px 0;transition:all 0.2s
+
+        .glass-strong {
+            background: rgba(31, 41, 55, 0.5);
+            backdrop-filter: blur(30px) saturate(180%);
+            -webkit-backdrop-filter: blur(30px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
         }
-        .user-item:hover{background:rgba(139,92,246,0.3);transform:translateX(4px)}
-        .user-item.active{background:rgba(139,92,246,0.4);border:1px solid rgba(139,92,246,0.5)}
-        .status-dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:4px}
-        .online{background:#10b981;box-shadow:0 0 10px #10b981}
-        .offline{background:#6b7280}
-        .chat-area{
-            height:350px;overflow-y:auto;padding:15px;
-            background:rgba(0,0,0,0.2);border-radius:14px;
-            display:flex;flex-direction:column;gap:10px
+
+        /* Общие стили */
+        .app-container {
+            position: relative;
+            z-index: 1;
+            min-height: 100vh;
         }
-        .message{
-            padding:10px 16px;border-radius:18px;max-width:75%;
-            animation:slideIn 0.3s;word-wrap:break-word
+
+        input, textarea {
+            width: 100%;
+            padding: 14px 18px;
+            margin: 6px 0;
+            background: rgba(55, 65, 81, 0.4);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            color: #fff;
+            font-size: 15px;
+            outline: none;
+            transition: all 0.3s;
         }
-        .message.own{
-            background:linear-gradient(135deg,#8b5cf6,#7c3aed);
-            align-self:flex-end;border-bottom-right-radius:4px
+
+        input:focus, textarea:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
         }
-        .message.other{
-            background:rgba(55,65,81,0.8);
-            align-self:flex-start;border-bottom-left-radius:4px
+
+        textarea { resize: none; }
+
+        button {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, var(--accent), #7c3aed);
+            border: none;
+            border-radius: 50px;
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 14px;
+            position: relative;
+            overflow: hidden;
         }
-        .message-sender{font-size:11px;color:rgba(255,255,255,0.6);margin-bottom:4px}
-        .message-time{font-size:10px;color:rgba(255,255,255,0.4);margin-top:4px;text-align:right}
-        @keyframes slideIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-        .tabs{display:flex;gap:8px;margin-bottom:15px}
-        .tab-btn{padding:10px 20px;border-radius:50px;font-size:13px}
-        .tab-btn.active{background:linear-gradient(135deg,#8b5cf6,#7c3aed)!important}
-        .grid-2{display:grid;grid-template-columns:300px 1fr;gap:15px}
-        @media(max-width:768px){
-            .grid-2{grid-template-columns:1fr}
-            .header h1{font-size:32px}
+
+        button::before {
+            content: '';
+            position: absolute;
+            top: 0; left: -100%;
+            width: 100%; height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+            transition: left 0.5s;
         }
+
+        button:hover::before { left: 100%; }
+        button:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(139, 92, 246, 0.4); }
+        button:active { transform: scale(0.95); }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+        }
+
+        .btn-demo {
+            background: rgba(139, 92, 246, 0.2);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(139, 92, 246, 0.3);
+            font-size: 13px;
+            padding: 10px 20px;
+        }
+
+        /* Аватарки с эффектом */
+        .avatar {
+            width: 48px; height: 48px;
+            border-radius: 16px;
+            object-fit: cover;
+            box-shadow: 0 4px 15px rgba(139, 92, 246, 0.3);
+        }
+
+        .avatar-lg {
+            width: 100px; height: 100px;
+            border-radius: 28px;
+            object-fit: cover;
+            box-shadow: 0 8px 30px rgba(139, 92, 246, 0.4);
+        }
+
+        .status-dot {
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 4px;
+        }
+        .online { background: #10b981; box-shadow: 0 0 10px #10b981; }
+        .offline { background: #6b7280; }
+
+        /* Сообщения */
+        .message {
+            padding: 12px 18px;
+            border-radius: 20px;
+            max-width: 75%;
+            word-wrap: break-word;
+            animation: msgSlide 0.3s ease;
+        }
+
+        .message.own {
+            background: linear-gradient(135deg, var(--accent), #7c3aed);
+            align-self: flex-end;
+            border-bottom-right-radius: 6px;
+        }
+
+        .message.other {
+            background: rgba(55, 65, 81, 0.5);
+            backdrop-filter: blur(10px);
+            align-self: flex-start;
+            border-bottom-left-radius: 6px;
+        }
+
+        @keyframes msgSlide {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .hidden { display: none !important; }
+
+        /* ============ ДЕСКТОП (>= 769px) ============ */
+        @media (min-width: 769px) {
+            .desktop-layout {
+                display: flex;
+                min-height: 100vh;
+                padding: 20px;
+                gap: 20px;
+            }
+
+            .sidebar-pc {
+                width: 350px;
+                display: flex;
+                flex-direction: column;
+                gap: 15px;
+            }
+
+            .main-pc {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                gap: 15px;
+            }
+
+            .chat-list-pc {
+                flex: 1;
+                overflow-y: auto;
+                border-radius: 24px;
+                padding: 20px;
+            }
+
+            .chat-area-pc {
+                flex: 1;
+                overflow-y: auto;
+                border-radius: 24px;
+                padding: 20px;
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+            }
+
+            .user-item {
+                display: flex;
+                align-items: center;
+                gap: 14px;
+                padding: 14px;
+                margin: 4px 0;
+                background: rgba(55,65,81,0.2);
+                backdrop-filter: blur(10px);
+                border-radius: 18px;
+                cursor: pointer;
+                transition: all 0.2s;
+                border: 1px solid transparent;
+            }
+
+            .user-item:hover {
+                background: rgba(139,92,246,0.2);
+                border-color: rgba(139,92,246,0.3);
+                transform: translateX(6px);
+            }
+
+            .user-item.active {
+                background: rgba(139,92,246,0.3);
+                border-color: rgba(139,92,246,0.5);
+                box-shadow: 0 4px 20px rgba(139,92,246,0.2);
+            }
+
+            .auth-card {
+                max-width: 450px;
+                margin: 80px auto;
+                padding: 40px;
+                border-radius: 32px;
+            }
+
+            .header-title {
+                font-size: 52px;
+                background: linear-gradient(135deg, #a78bfa, #ec4899);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }
+
+            .mobile-only { display: none !important; }
+        }
+
+        /* ============ МОБИЛЬНЫЙ (< 768px) ============ */
+        @media (max-width: 768px) {
+            .desktop-layout {
+                display: flex;
+                flex-direction: column;
+                min-height: 100vh;
+                padding: 10px;
+                gap: 8px;
+            }
+
+            .pc-only { display: none !important; }
+
+            /* Мобильная навигация */
+            .mobile-nav {
+                position: fixed;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                display: flex;
+                justify-content: space-around;
+                padding: 10px;
+                background: rgba(31, 41, 55, 0.6);
+                backdrop-filter: blur(20px);
+                -webkit-backdrop-filter: blur(20px);
+                border-top: 1px solid rgba(255, 255, 255, 0.1);
+                z-index: 100;
+            }
+
+            .mobile-nav-btn {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 4px;
+                padding: 8px 16px;
+                background: transparent;
+                border: none;
+                color: #9ca3af;
+                font-size: 11px;
+                font-weight: 500;
+                cursor: pointer;
+                transition: all 0.3s;
+            }
+
+            .mobile-nav-btn .icon {
+                font-size: 22px;
+                transition: transform 0.3s;
+            }
+
+            .mobile-nav-btn.active {
+                color: var(--accent);
+            }
+
+            .mobile-nav-btn.active .icon {
+                transform: scale(1.2);
+                text-shadow: 0 0 15px var(--accent);
+            }
+
+            /* Мобильный чат */
+            .mobile-chat-list {
+                flex: 1;
+                overflow-y: auto;
+                padding-bottom: 70px;
+            }
+
+            .mobile-chat-area {
+                flex: 1;
+                overflow-y: auto;
+                padding-bottom: 70px;
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            .user-item {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 14px;
+                margin: 6px 0;
+                background: rgba(55,65,81,0.3);
+                backdrop-filter: blur(10px);
+                border-radius: 20px;
+                cursor: pointer;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.05);
+            }
+
+            .user-item:active {
+                background: rgba(139,92,246,0.3);
+                transform: scale(0.98);
+            }
+
+            .user-item.active {
+                background: rgba(139,92,246,0.35);
+                border-color: rgba(139,92,246,0.4);
+            }
+
+            /* Мобильное поле ввода */
+            .mobile-input-bar {
+                position: fixed;
+                bottom: 65px;
+                left: 10px;
+                right: 10px;
+                display: flex;
+                gap: 8px;
+                padding: 10px;
+                background: rgba(31, 41, 55, 0.7);
+                backdrop-filter: blur(20px);
+                border-radius: 30px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                z-index: 99;
+            }
+
+            .mobile-input-bar input {
+                padding: 12px 16px;
+                font-size: 16px;
+            }
+
+            .mobile-input-bar button {
+                padding: 10px 20px;
+                font-size: 16px;
+            }
+
+            .auth-card {
+                max-width: 100%;
+                margin: 20px 10px;
+                padding: 30px 20px;
+                border-radius: 28px;
+            }
+
+            .header-title {
+                font-size: 36px;
+                background: linear-gradient(135deg, #a78bfa, #ec4899);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }
+
+            .message {
+                max-width: 85%;
+            }
+        }
+
+        /* Анимация появления */
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .fade-in { animation: fadeIn 0.3s ease; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>💬 Millow Messenger</h1>
-            <p class="status">🟢 Server Active | <span id="stats">Loading...</span></p>
-        </div>
+    <div class="app-container" id="appRoot">
+        <!-- ============ АВТОРИЗАЦИЯ ============ -->
+        <div id="authScreen">
+            <div class="desktop-layout" style="align-items:center;justify-content:center;">
+                <div class="auth-card glass-strong">
+                    <div style="text-align:center;margin-bottom:30px;">
+                        <h1 class="header-title">💬 Millow</h1>
+                        <p style="color:#9ca3af;font-size:14px;margin-top:8px;" id="authSubtitle">Login to continue</p>
+                    </div>
 
-        <!-- Auth Screen -->
-        <div class="card" id="authScreen">
-            <h2 id="authTitle" class="mb-2">Login to Millow</h2>
-            <input type="text" id="regName" placeholder="Full Name" class="hidden">
-            <input type="email" id="email" placeholder="Email address">
-            <input type="password" id="password" placeholder="Password">
-            <div class="flex gap-2 mt-4">
-                <button onclick="handleAuth()" id="authBtn" style="flex:1">Login</button>
-                <button onclick="toggleAuth()" id="toggleBtn" class="secondary">Create Account</button>
+                    <div style="display:flex;gap:8px;justify-content:center;margin-bottom:20px;flex-wrap:wrap;">
+                        <button class="btn-demo" onclick="quickLogin('taran@millow.com','fastyk26tyr')">
+                            👤 TARAN
+                        </button>
+                        <button class="btn-demo" onclick="quickLogin('test@millow.com','test123')">
+                            👤 Test
+                        </button>
+                    </div>
+
+                    <div style="text-align:center;color:#6b7280;font-size:12px;margin-bottom:15px;">or manually</div>
+
+                    <input type="text" id="regName" placeholder="Full Name" class="hidden">
+                    <input type="email" id="email" placeholder="Email address" autocomplete="email">
+                    <input type="password" id="password" placeholder="Password" autocomplete="current-password">
+
+                    <div style="display:flex;gap:10px;margin-top:20px;">
+                        <button onclick="handleAuth()" id="authBtn" style="flex:1;">Login</button>
+                        <button onclick="toggleAuth()" id="toggleBtn" class="btn-secondary">Register</button>
+                    </div>
+                    <p id="authError" style="color:#ef4444;text-align:center;margin-top:12px;font-size:13px;"></p>
+                </div>
             </div>
-            <p id="authError" class="text-red text-center mt-2"></p>
         </div>
 
-        <!-- Main App -->
+        <!-- ============ ГЛАВНЫЙ ИНТЕРФЕЙС ============ -->
         <div id="appScreen" class="hidden">
-            <div class="flex justify-between items-center mb-2">
-                <div class="tabs">
-                    <button onclick="showTab('chats')" id="tabChats" class="tab-btn active">💬 Chats</button>
-                    <button onclick="showTab('users')" id="tabUsers" class="tab-btn secondary">👥 Users</button>
-                    <button onclick="showTab('profile')" id="tabProfile" class="tab-btn secondary">👤 Profile</button>
-                </div>
-                <button onclick="logout()" class="danger">🚪 Logout</button>
-            </div>
-
-            <!-- Chats Tab -->
-            <div id="tabContentChats">
-                <div class="grid-2">
-                    <div>
-                        <div class="card" style="max-height:500px;overflow-y:auto">
-                            <h3 class="mb-2">Your Chats</h3>
-                            <div id="chatsList"></div>
+            <!-- ДЕСКТОП -->
+            <div class="desktop-layout pc-only">
+                <div class="sidebar-pc">
+                    <div class="glass-strong" style="padding:20px;border-radius:24px;text-align:center;">
+                        <h1 style="font-size:28px;background:linear-gradient(135deg,#a78bfa,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">💬 Millow</h1>
+                        <div style="display:flex;gap:8px;margin-top:15px;">
+                            <button onclick="showTab('chats')" id="tabChatsPc" style="flex:1;font-size:12px;">Chats</button>
+                            <button onclick="showTab('users')" id="tabUsersPc" class="btn-secondary" style="flex:1;font-size:12px;">Users</button>
+                            <button onclick="showTab('profile')" id="tabProfilePc" class="btn-secondary" style="flex:1;font-size:12px;">Profile</button>
                         </div>
                     </div>
-                    <div>
-                        <div class="card">
-                            <div class="flex justify-between items-center mb-2">
-                                <h3 id="chatTitle">Select a chat</h3>
-                                <button onclick="deleteChat()" class="danger secondary" style="padding:6px 12px;font-size:12px">🗑️</button>
+                    <div class="chat-list-pc glass" id="chatsListPc"></div>
+                    <div style="padding:15px;display:flex;align-items:center;gap:12px;cursor:pointer;" onclick="showTab('profile')" class="glass-strong" id="userMini">
+                        <img id="userMiniAvatar" class="avatar" src="">
+                        <div style="flex:1;"><b id="userMiniName"></b><br><span style="color:#10b981;font-size:12px;">Online</span></div>
+                        <button onclick="event.stopPropagation();logout();" class="btn-danger" style="padding:8px 14px;font-size:12px;">Logout</button>
+                    </div>
+                </div>
+
+                <div class="main-pc">
+                    <!-- Вкладка чатов -->
+                    <div id="chatsTab">
+                        <div class="glass-strong" style="padding:20px;border-radius:24px;display:flex;justify-content:space-between;align-items:center;">
+                            <h2 id="chatTitlePc" style="font-size:20px;">Select a chat</h2>
+                        </div>
+                        <div class="chat-area-pc glass" id="chatAreaPc">
+                            <p style="color:#9ca3af;text-align:center;margin-top:40px;">👋 Select a user from the list</p>
+                        </div>
+                        <div style="display:flex;gap:10px;margin-top:10px;" class="glass-strong" id="inputBarPc">
+                            <input type="text" id="messageInputPc" placeholder="Type a message..." style="flex:1;" onkeypress="if(event.key==='Enter')sendMessage()">
+                            <button onclick="sendMessage()">📤 Send</button>
+                        </div>
+                    </div>
+
+                    <!-- Вкладка пользователей -->
+                    <div id="usersTab" class="hidden">
+                        <div class="glass-strong" style="padding:20px;border-radius:24px;">
+                            <h2 style="font-size:20px;margin-bottom:15px;">All Users</h2>
+                            <input type="text" placeholder="Search users..." onkeyup="filterUsers()" id="userSearchPc">
+                            <div id="usersListPc" style="max-height:500px;overflow-y:auto;margin-top:10px;"></div>
+                        </div>
+                    </div>
+
+                    <!-- Вкладка профиля -->
+                    <div id="profileTab" class="hidden">
+                        <div class="glass-strong" style="padding:30px;border-radius:24px;text-align:center;">
+                            <h2 style="font-size:24px;margin-bottom:20px;">Edit Profile</h2>
+                            <img id="profileAvatarPc" class="avatar-lg" src="">
+                            <div style="margin:15px 0;">
+                                <input type="file" id="avatarFilePc" accept="image/*" style="display:none;" onchange="uploadAvatar()">
+                                <button onclick="document.getElementById('avatarFilePc').click()" class="btn-secondary">📷 Change Photo</button>
                             </div>
-                            <div class="chat-area" id="chatArea">
-                                <p class="text-gray text-center mt-4">👋 Select a user to start chatting</p>
-                            </div>
-                            <div class="flex gap-2 mt-4">
-                                <input type="text" id="messageInput" placeholder="Type a message..." style="flex:1" 
-                                       onkeypress="if(event.key==='Enter')sendMessage()">
-                                <button onclick="sendMessage()">📤 Send</button>
+                            <input type="text" id="profileNamePc" placeholder="Name">
+                            <input type="email" id="profileEmailPc" placeholder="Email">
+                            <textarea id="profileBioPc" placeholder="Bio" rows="3"></textarea>
+                            <input type="tel" id="profilePhonePc" placeholder="Phone">
+                            <div style="display:flex;gap:10px;margin-top:20px;">
+                                <button onclick="updateProfile()" style="flex:1;">💾 Save</button>
+                                <button onclick="showTab('chats')" class="btn-secondary" style="flex:1;">Cancel</button>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Users Tab -->
-            <div id="tabContentUsers" class="hidden">
-                <div class="card">
-                    <h3 class="mb-2">All Users</h3>
-                    <input type="text" id="userSearch" placeholder="🔍 Search users..." onkeyup="filterUsers()">
-                    <div id="usersList" style="max-height:400px;overflow-y:auto;margin-top:10px"></div>
-                </div>
-            </div>
+            <!-- МОБИЛЬНЫЙ -->
+            <div class="desktop-layout mobile-only">
+                <div id="mobileContent" class="mobile-chat-list fade-in"></div>
 
-            <!-- Profile Tab -->
-            <div id="tabContentProfile" class="hidden">
-                <div class="card">
-                    <h2 class="mb-2">Edit Profile</h2>
-                    <div class="text-center mt-4">
-                        <img id="profileAvatar" class="avatar-lg" src="" alt="Avatar">
-                        <div class="mt-2">
-                            <input type="file" id="avatarFile" accept="image/*" style="display:none" onchange="uploadAvatar()">
-                            <button onclick="document.getElementById('avatarFile').click()" class="secondary">📷 Change Photo</button>
-                        </div>
-                    </div>
-                    <div class="mt-4"><label class="text-sm text-gray">Name</label>
-                    <input type="text" id="profileName"></div>
-                    <div><label class="text-sm text-gray">Email</label>
-                    <input type="email" id="profileEmail"></div>
-                    <div><label class="text-sm text-gray">Bio</label>
-                    <textarea id="profileBio" rows="3"></textarea></div>
-                    <div><label class="text-sm text-gray">Phone</label>
-                    <input type="tel" id="profilePhone"></div>
-                    <div class="flex gap-2 mt-4">
-                        <button onclick="updateProfile()" style="flex:1">💾 Save Changes</button>
-                        <button onclick="showTab('chats')" class="secondary" style="flex:1">Cancel</button>
-                    </div>
+                <!-- Мобильная навигация -->
+                <div class="mobile-nav">
+                    <button class="mobile-nav-btn active" onclick="showMobileTab('chats')" id="mobNavChats">
+                        <span class="icon">💬</span> Chats
+                    </button>
+                    <button class="mobile-nav-btn" onclick="showMobileTab('users')" id="mobNavUsers">
+                        <span class="icon">👥</span> Users
+                    </button>
+                    <button class="mobile-nav-btn" onclick="showMobileTab('profile')" id="mobNavProfile">
+                        <span class="icon">👤</span> Profile
+                    </button>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
-        const API = window.location.origin;
-        let token = localStorage.getItem('millow_token');
-        let user = JSON.parse(localStorage.getItem('millow_user')||'null');
+        const API = location.origin;
+        let token = localStorage.getItem('mtoken');
+        let user = JSON.parse(localStorage.getItem('muser')||'null');
         let isLogin = true;
         let socket = null;
         let currentChat = null;
         let allUsers = [];
         let allChats = [];
+        let isMobile = window.innerWidth <= 768;
+        let currentMobileTab = 'chats';
 
         // Init
-        checkServer();
         if(token && user) { showApp(); connectWS(); }
-        setInterval(() => { if(currentChat) loadMessages(); }, 1500);
+        setInterval(() => { if(currentChat) loadMessages(); }, 2000);
+        
+        window.addEventListener('resize', () => {
+            isMobile = window.innerWidth <= 768;
+            if(token && user) renderAll();
+        });
 
-        async function checkServer() {
-            try {
-                const r = await fetch(API+'/api/health');
-                const d = await r.json();
-                document.getElementById('stats').textContent = d.users+' users, '+d.chats+' chats, '+d.messages+' messages';
-            } catch(e) {
-                document.getElementById('stats').textContent = 'Connecting...';
-            }
+        function quickLogin(email, password) {
+            document.getElementById('email').value = email;
+            document.getElementById('password').value = password;
+            handleAuth();
         }
 
         function toggleAuth() {
             isLogin = !isLogin;
             document.getElementById('regName').classList.toggle('hidden', isLogin);
-            document.getElementById('authTitle').textContent = isLogin ? 'Login to Millow' : 'Create Account';
+            document.getElementById('authSubtitle').textContent = isLogin ? 'Login to continue' : 'Create account';
             document.getElementById('authBtn').textContent = isLogin ? 'Login' : 'Register';
             document.getElementById('toggleBtn').textContent = isLogin ? 'Create Account' : 'Back to Login';
             document.getElementById('authError').textContent = '';
@@ -389,61 +665,63 @@ HTML_PAGE = """<!DOCTYPE html>
             const password = document.getElementById('password').value;
             const name = document.getElementById('regName').value.trim();
             
-            if(!email||!password) {
-                document.getElementById('authError').textContent = 'Please fill all fields';
-                return;
-            }
+            if(!email || !password) { document.getElementById('authError').textContent='Fill all fields'; return; }
             
             const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
             const body = isLogin ? {email,password} : {name,email,password};
             
             try {
-                const r = await fetch(API+endpoint, {
-                    method:'POST',
-                    headers:{'Content-Type':'application/json'},
-                    body:JSON.stringify(body)
-                });
+                const r = await fetch(API+endpoint, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
                 const d = await r.json();
                 if(!r.ok) throw new Error(d.detail||'Error');
-                
                 token = d.token; user = d.user;
-                localStorage.setItem('millow_token', token);
-                localStorage.setItem('millow_user', JSON.stringify(user));
+                localStorage.setItem('mtoken', token);
+                localStorage.setItem('muser', JSON.stringify(user));
                 showApp(); connectWS(); loadAll();
-            } catch(e) {
-                document.getElementById('authError').textContent = e.message;
-            }
+            } catch(e) { document.getElementById('authError').textContent = e.message; }
         }
 
         function showApp() {
             document.getElementById('authScreen').classList.add('hidden');
             document.getElementById('appScreen').classList.remove('hidden');
+            updateUserMini();
             showTab('chats');
         }
 
+        function updateUserMini() {
+            try {
+                document.getElementById('userMiniAvatar').src = user.avatar;
+                document.getElementById('userMiniName').textContent = user.name;
+            } catch(e) {}
+        }
+
+        function logout() {
+            localStorage.clear();
+            location.reload();
+        }
+
         function showTab(tab) {
-            ['tabContentChats','tabContentUsers','tabContentProfile'].forEach(id => document.getElementById(id).classList.add('hidden'));
-            document.getElementById('tabContent'+tab.charAt(0).toUpperCase()+tab.slice(1)).classList.remove('hidden');
-            
-            ['tabChats','tabUsers','tabProfile'].forEach(id => {
-                document.getElementById(id).className = 'tab-btn secondary';
+            ['chatsTab','usersTab','profileTab'].forEach(id => {
+                const el = document.getElementById(id);
+                if(el) el.classList.add('hidden');
             });
-            document.getElementById('tab'+tab.charAt(0).toUpperCase()+tab.slice(1)).className = 'tab-btn active';
+            
+            const tabEl = document.getElementById(tab+'Tab');
+            if(tabEl) tabEl.classList.remove('hidden');
             
             if(tab==='users') loadUsers();
             if(tab==='profile') loadProfile();
             if(tab==='chats') loadChats();
         }
 
-        function logout() {
-            localStorage.clear();
-            token=null; user=null; currentChat=null;
-            if(socket) socket.close();
-            document.getElementById('authScreen').classList.remove('hidden');
-            document.getElementById('appScreen').classList.add('hidden');
+        function showMobileTab(tab) {
+            currentMobileTab = tab;
+            document.querySelectorAll('.mobile-nav-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('mobNav'+tab.charAt(0).toUpperCase()+tab.slice(1)).classList.add('active');
+            renderMobile();
         }
 
-        async function loadAll() { await loadUsers(); await loadChats(); checkServer(); }
+        async function loadAll() { await loadUsers(); await loadChats(); }
 
         async function loadUsers() {
             try {
@@ -454,35 +732,29 @@ HTML_PAGE = """<!DOCTYPE html>
         }
 
         function renderUsers() {
-            const list = document.getElementById('usersList');
-            list.innerHTML = allUsers.length ? '' : '<p class="text-gray text-center">No users yet</p>';
-            allUsers.forEach(u => {
-                const div = document.createElement('div');
-                div.className = 'user-item';
-                div.innerHTML = `
-                    <img src="${u.avatar||'https://ui-avatars.com/api/?name=U&background=8B5CF6&color=fff'}" class="avatar">
-                    <div style="flex:1">
-                        <b>${u.name}</b><br>
-                        <span class="status-dot ${u.online?'online':'offline'}"></span>
-                        <span class="text-sm text-gray">${u.online?'Online':'Offline'}</span>
-                    </div>
-                `;
-                div.onclick = () => startChat(u.id);
-                list.appendChild(div);
-            });
+            const containerPc = document.getElementById('usersListPc');
+            const html = allUsers.length ? allUsers.map(u => `
+                <div class="user-item" onclick="startChat('${u.id}')">
+                    <img src="${u.avatar}" class="avatar" onerror="this.src='https://ui-avatars.com/api/?name=${u.name}&background=8B5CF6&color=fff'">
+                    <div style="flex:1;"><b>${u.name}</b><br><span style="color:#9ca3af;font-size:12px;"><span class="status-dot ${u.online?'online':'offline'}"></span>${u.online?'Online':'Offline'}</span></div>
+                </div>
+            `).join('') : '<p style="color:#9ca3af;text-align:center;">No users yet</p>';
+            
+            if(containerPc) containerPc.innerHTML = html;
         }
 
         function filterUsers() {
-            const s = document.getElementById('userSearch').value.toLowerCase();
-            const list = document.getElementById('usersList');
-            list.innerHTML = '';
-            allUsers.filter(u => u.name.toLowerCase().includes(s)||u.email.toLowerCase().includes(s)).forEach(u => {
-                const div = document.createElement('div');
-                div.className = 'user-item';
-                div.innerHTML = `<img src="${u.avatar}" class="avatar"><div style="flex:1"><b>${u.name}</b></div>`;
-                div.onclick = () => startChat(u.id);
-                list.appendChild(div);
-            });
+            const s = (document.getElementById('userSearchPc')?.value || '').toLowerCase();
+            const container = document.getElementById('usersListPc');
+            if(!container) return;
+            
+            const filtered = allUsers.filter(u => u.name.toLowerCase().includes(s));
+            container.innerHTML = filtered.length ? filtered.map(u => `
+                <div class="user-item" onclick="startChat('${u.id}')">
+                    <img src="${u.avatar}" class="avatar">
+                    <div style="flex:1;"><b>${u.name}</b><br><span style="color:#9ca3af;font-size:12px;">${u.email}</span></div>
+                </div>
+            `).join('') : '<p style="color:#9ca3af;text-align:center;">No users found</p>';
         }
 
         async function loadChats() {
@@ -494,44 +766,75 @@ HTML_PAGE = """<!DOCTYPE html>
         }
 
         function renderChats() {
-            const list = document.getElementById('chatsList');
-            list.innerHTML = allChats.length ? '' : '<p class="text-gray text-center">No chats yet</p>';
-            allChats.forEach(c => {
-                if(!c.otherUser) return;
-                const div = document.createElement('div');
-                div.className = 'user-item';
-                if(currentChat?.id === c.id) div.classList.add('active');
-                div.innerHTML = `
-                    <img src="${c.otherUser.avatar}" class="avatar">
-                    <div style="flex:1">
-                        <b>${c.otherUser.name}</b><br>
-                        <span class="text-sm text-gray">${c.lastMessage?.content?.substring(0,25)||'No messages'}</span>
+            const containerPc = document.getElementById('chatsListPc');
+            const html = allChats.length ? allChats.map(c => {
+                if(!c.otherUser) return '';
+                return `
+                    <div class="user-item ${currentChat?.id===c.id?'active':''}" onclick="selectChat('${c.id}')">
+                        <img src="${c.otherUser.avatar}" class="avatar">
+                        <div style="flex:1;"><b>${c.otherUser.name}</b><br><span style="color:#9ca3af;font-size:12px;">${(c.lastMessage?.content||'No messages').substring(0,30)}</span></div>
+                        <span class="status-dot ${c.otherUser.online?'online':'offline'}"></span>
                     </div>
-                    <span class="status-dot ${c.otherUser.online?'online':'offline'}"></span>
                 `;
-                div.onclick = () => selectChat(c);
-                list.appendChild(div);
-            });
+            }).join('') : '<p style="color:#9ca3af;text-align:center;padding:20px;">No chats yet</p>';
+            
+            if(containerPc) containerPc.innerHTML = html;
+            if(isMobile) renderMobile();
+        }
+
+        function renderMobile() {
+            const content = document.getElementById('mobileContent');
+            if(!content) return;
+            
+            if(currentMobileTab === 'chats') {
+                content.innerHTML = allChats.length ? allChats.map(c => {
+                    if(!c.otherUser) return '';
+                    return `
+                        <div class="user-item ${currentChat?.id===c.id?'active':''}" onclick="selectChat('${c.id}')">
+                            <img src="${c.otherUser.avatar}" class="avatar">
+                            <div style="flex:1;"><b>${c.otherUser.name}</b><br><span style="color:#9ca3af;font-size:12px;">${(c.lastMessage?.content||'No messages').substring(0,35)}</span></div>
+                            <span class="status-dot ${c.otherUser.online?'online':'offline'}"></span>
+                        </div>
+                    `;
+                }).join('') : '<p style="color:#9ca3af;text-align:center;padding:40px;">No chats yet</p>';
+            } else if(currentMobileTab === 'users') {
+                content.innerHTML = allUsers.length ? allUsers.map(u => `
+                    <div class="user-item" onclick="startChat('${u.id}')">
+                        <img src="${u.avatar}" class="avatar">
+                        <div style="flex:1;"><b>${u.name}</b><br><span style="color:#9ca3af;font-size:12px;"><span class="status-dot ${u.online?'online':'offline'}"></span>${u.online?'Online':'Offline'}</span></div>
+                    </div>
+                `).join('') : '<p style="color:#9ca3af;text-align:center;padding:40px;">No users</p>';
+            } else {
+                content.innerHTML = `
+                    <div class="glass-strong" style="padding:20px;text-align:center;margin-top:10px;">
+                        <h2 style="margin-bottom:15px;">Profile</h2>
+                        <img src="${user.avatar}" class="avatar-lg" onerror="this.src='https://ui-avatars.com/api/?name=U&background=8B5CF6&color=fff'">
+                        <h3 style="margin:10px 0;">${user.name}</h3>
+                        <p style="color:#9ca3af;">${user.email}</p>
+                        <button onclick="logout()" class="btn-danger" style="margin-top:15px;width:100%;">Logout</button>
+                    </div>
+                `;
+            }
         }
 
         async function startChat(uid) {
             try {
-                const r = await fetch(API+'/api/chats', {
-                    method:'POST',
-                    headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
-                    body:JSON.stringify({participantId:uid})
-                });
+                const r = await fetch(API+'/api/chats', {method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({participantId:uid})});
                 currentChat = await r.json();
-                selectChat(currentChat);
-                showTab('chats');
+                selectChat(currentChat.id);
+                if(!isMobile) showTab('chats');
             } catch(e) {}
         }
 
-        function selectChat(c) {
-            currentChat = c;
-            document.getElementById('chatTitle').textContent = c.otherUser ? '💬 '+c.otherUser.name : 'Chat';
-            document.getElementById('chatArea').innerHTML = '';
-            loadMessages(); renderChats();
+        function selectChat(chatId) {
+            currentChat = allChats.find(c => c.id === chatId) || currentChat;
+            if(!currentChat) return;
+            
+            const titlePc = document.getElementById('chatTitlePc');
+            if(titlePc) titlePc.textContent = '💬 ' + (currentChat.otherUser?.name || 'Chat');
+            
+            loadMessages();
+            renderChats();
         }
 
         async function loadMessages() {
@@ -539,24 +842,49 @@ HTML_PAGE = """<!DOCTYPE html>
             try {
                 const r = await fetch(API+'/api/messages/'+currentChat.id, {headers:{'Authorization':'Bearer '+token}});
                 const msgs = await r.json();
-                const area = document.getElementById('chatArea');
-                area.innerHTML = msgs.length ? '' : '<p class="text-gray text-center mt-4">No messages yet. Say hello! 👋</p>';
-                msgs.forEach(m => {
-                    const div = document.createElement('div');
-                    div.className = 'message '+(m.senderId===user.id?'own':'other');
-                    div.innerHTML = `
-                        ${m.senderId!==user.id ? `<div class="message-sender">${m.sender?.name||'Unknown'}</div>` : ''}
-                        ${m.content}
-                        <div class="message-time">${new Date(m.timestamp).toLocaleTimeString()}</div>
+                
+                const html = msgs.length ? msgs.map(m => {
+                    const isOwn = m.senderId === user.id;
+                    return `
+                        <div class="message ${isOwn?'own':'other'}">
+                            ${!isOwn ? `<div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:4px;">${m.sender?.name||''}</div>` : ''}
+                            ${m.content}
+                            <div style="font-size:10px;color:rgba(255,255,255,0.3);margin-top:4px;text-align:right;">${new Date(m.timestamp).toLocaleTimeString()}</div>
+                        </div>
                     `;
-                    area.appendChild(div);
-                });
-                area.scrollTop = area.scrollHeight;
+                }).join('') : '<p style="color:#9ca3af;text-align:center;">No messages yet 👋</p>';
+                
+                const areaPc = document.getElementById('chatAreaPc');
+                if(areaPc) { areaPc.innerHTML = html; areaPc.scrollTop = areaPc.scrollHeight; }
+                
+                if(isMobile) {
+                    const mobileContent = document.getElementById('mobileContent');
+                    if(mobileContent && currentMobileTab==='chats') {
+                        // Показываем область сообщений
+                        const chatTitle = document.getElementById('chatTitlePc');
+                        mobileContent.innerHTML = `
+                            <div style="padding:10px;display:flex;justify-content:space-between;align-items:center;" class="glass-strong">
+                                <b>${currentChat.otherUser?.name||'Chat'}</b>
+                                <button onclick="showMobileTab('chats');currentChat=null;renderMobile();" class="btn-secondary" style="padding:6px 12px;font-size:12px;">← Back</button>
+                            </div>
+                            <div class="mobile-chat-area">${html}</div>
+                            <div class="mobile-input-bar">
+                                <input type="text" id="msgInputMob" placeholder="Message..." onkeypress="if(event.key==='Enter')sendMessageMobile()">
+                                <button onclick="sendMessageMobile()">Send</button>
+                            </div>
+                        `;
+                        setTimeout(() => {
+                            const area = document.querySelector('.mobile-chat-area');
+                            if(area) area.scrollTop = area.scrollHeight;
+                        }, 100);
+                    }
+                }
             } catch(e) {}
         }
 
-        async function sendMessage() {
-            const input = document.getElementById('messageInput');
+        function sendMessage() {
+            const input = isMobile ? document.getElementById('msgInputMob') : document.getElementById('messageInputPc');
+            if(!input) return;
             const content = input.value.trim();
             if(!content||!currentChat) return;
             input.value = '';
@@ -564,332 +892,225 @@ HTML_PAGE = """<!DOCTYPE html>
             if(socket && socket.readyState===WebSocket.OPEN) {
                 socket.send(JSON.stringify({type:'private-message',chatId:currentChat.id,senderId:user.id,content}));
             }
-            setTimeout(loadMessages, 300);
+            setTimeout(loadMessages, 500);
         }
 
-        function deleteChat() {
-            if(currentChat && confirm('Close this chat?')) {
-                currentChat = null;
-                document.getElementById('chatArea').innerHTML = '<p class="text-gray text-center mt-4">Select a user to chat</p>';
-                document.getElementById('chatTitle').textContent = 'Select a chat';
-                renderChats();
-            }
-        }
+        function sendMessageMobile() { sendMessage(); }
 
         function loadProfile() {
-            document.getElementById('profileAvatar').src = user.avatar||'https://ui-avatars.com/api/?name=U&background=8B5CF6&color=fff';
-            document.getElementById('profileName').value = user.name||'';
-            document.getElementById('profileEmail').value = user.email||'';
-            document.getElementById('profileBio').value = user.bio||'';
-            document.getElementById('profilePhone').value = user.phone||'';
+            const pc = {
+                avatar: document.getElementById('profileAvatarPc'),
+                name: document.getElementById('profileNamePc'),
+                email: document.getElementById('profileEmailPc'),
+                bio: document.getElementById('profileBioPc'),
+                phone: document.getElementById('profilePhonePc')
+            };
+            
+            if(pc.avatar) {
+                pc.avatar.src = user.avatar;
+                pc.name.value = user.name||'';
+                pc.email.value = user.email||'';
+                pc.bio.value = user.bio||'';
+                pc.phone.value = user.phone||'';
+            }
         }
 
         async function updateProfile() {
             const body = {
-                name: document.getElementById('profileName').value,
-                email: document.getElementById('profileEmail').value,
-                bio: document.getElementById('profileBio').value,
-                phone: document.getElementById('profilePhone').value
+                name: document.getElementById('profileNamePc')?.value,
+                email: document.getElementById('profileEmailPc')?.value,
+                bio: document.getElementById('profileBioPc')?.value,
+                phone: document.getElementById('profilePhonePc')?.value
             };
+            
             try {
-                const r = await fetch(API+'/api/users/profile', {
-                    method:'PUT',
-                    headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
-                    body:JSON.stringify(body)
-                });
-                user = await r.json();
-                localStorage.setItem('millow_user', JSON.stringify(user));
-                alert('✅ Profile updated!');
-                showTab('chats');
-            } catch(e) {
-                alert('❌ Error: '+e.message);
-            }
+                const r = await fetch(API+'/api/users/profile', {method:'PUT',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(body)});
+                if(r.ok) {
+                    user = await r.json();
+                    localStorage.setItem('muser', JSON.stringify(user));
+                    updateUserMini();
+                    alert('✅ Profile saved!');
+                    showTab('chats');
+                }
+            } catch(e) {}
         }
 
         async function uploadAvatar() {
-            const file = document.getElementById('avatarFile').files[0];
+            const file = document.getElementById('avatarFilePc')?.files[0];
             if(!file) return;
-            const fd = new FormData();
-            fd.append('avatar', file);
+            const fd = new FormData(); fd.append('avatar', file);
             try {
-                const r = await fetch(API+'/api/users/avatar', {
-                    method:'POST',
-                    headers:{'Authorization':'Bearer '+token},
-                    body:fd
-                });
-                const d = await r.json();
-                user.avatar = API + d.url;
-                localStorage.setItem('millow_user', JSON.stringify(user));
-                document.getElementById('profileAvatar').src = user.avatar;
-                alert('✅ Avatar updated!');
-            } catch(e) {
-                alert('❌ Upload failed');
-            }
+                const r = await fetch(API+'/api/users/avatar', {method:'POST',headers:{'Authorization':'Bearer '+token},body:fd});
+                if(r.ok) {
+                    const d = await r.json();
+                    user.avatar = API + d.url;
+                    localStorage.setItem('muser', JSON.stringify(user));
+                    updateUserMini();
+                    document.getElementById('profileAvatarPc').src = user.avatar;
+                    alert('✅ Avatar updated!');
+                }
+            } catch(e) {}
+        }
+
+        function renderAll() {
+            loadAll();
+            renderChats();
+            renderUsers();
         }
 
         function connectWS() {
             if(!token||!user) return;
             try {
-                const proto = API.startsWith('https') ? 'wss' : 'ws';
-                const host = API.replace('https://','').replace('http://','');
-                socket = new WebSocket(proto+'://'+host+'/ws');
-                
-                socket.onopen = () => {
-                    console.log('WebSocket connected');
-                    socket.send(JSON.stringify({type:'login',userId:user.id}));
-                };
-                
+                const proto = location.protocol==='https:'?'wss':'ws';
+                socket = new WebSocket(proto+'://'+location.host+'/ws');
+                socket.onopen = () => socket.send(JSON.stringify({type:'login',userId:user.id}));
                 socket.onmessage = (e) => {
                     const d = JSON.parse(e.data);
-                    if(d.type==='private-message' && currentChat && d.chatId===currentChat.id) loadMessages();
-                    if(d.type==='user-status') { loadUsers(); loadChats(); checkServer(); }
+                    if(d.type==='private-message') { loadMessages(); loadChats(); }
+                    if(d.type==='user-status') { loadUsers(); loadChats(); }
                 };
-                
                 socket.onclose = () => setTimeout(connectWS, 3000);
-                socket.onerror = () => setTimeout(connectWS, 3000);
-            } catch(e) {
-                setTimeout(connectWS, 3000);
-            }
+            } catch(e) { setTimeout(connectWS, 3000); }
         }
     </script>
 </body>
 </html>"""
 
-# ============ API ROUTES ============
-
+# ============ API (тот же что и раньше) ============
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return HTML_PAGE
 
-@app.get("/api/health")
-async def health():
-    return {
-        "status": "ok",
-        "users": len(users_db),
-        "chats": len(chats_db),
-        "messages": len(messages_db),
-        "online": len(online_users)
-    }
-
 @app.post("/api/auth/register")
 async def register(data: UserRegister):
-    logger.info(f"📝 Register: {data.email}")
-    
     for u in users_db.values():
         if u["email"] == data.email:
             raise HTTPException(400, "User already exists")
-    
     uid = str(uuid.uuid4())
     users_db[uid] = {
-        "id": uid,
-        "name": data.name,
-        "email": data.email,
-        "password": pwd_context.hash(data.password),
-        "avatar": f"https://ui-avatars.com/api/?name={data.name}&background=8B5CF6&color=fff&size=200",
-        "bio": "Hey there! I'm using Millow 💜",
-        "phone": "",
-        "online": False,
-        "lastSeen": datetime.utcnow().isoformat(),
-        "createdAt": datetime.utcnow().isoformat()
+        "id": uid, "name": data.name, "email": data.email,
+        "password": hash_password(data.password),
+        "avatar": f"https://ui-avatars.com/api/?name={data.name}&background=8B5CF6&color=fff&size=200&bold=true",
+        "bio": "Hey there! I'm using Millow 💜", "phone": "",
+        "online": False, "lastSeen": datetime.utcnow().isoformat(), "createdAt": datetime.utcnow().isoformat()
     }
-    
-    save_data("users", users_db)
-    token = create_token({"id": uid, "email": data.email})
-    user_data = {k: v for k, v in users_db[uid].items() if k != "password"}
-    
-    logger.info(f"✅ Registered: {data.email}")
-    return {"token": token, "user": user_data}
+    token = create_token(uid)
+    return {"token": token, "user": {k:v for k,v in users_db[uid].items() if k!="password"}}
 
 @app.post("/api/auth/login")
 async def login(data: UserLogin):
-    logger.info(f"🔑 Login: {data.email}")
-    
     user = next((u for u in users_db.values() if u["email"] == data.email), None)
-    if not user or not pwd_context.verify(data.password, user["password"]):
-        raise HTTPException(401, "Invalid credentials")
-    
-    token = create_token({"id": user["id"], "email": user["email"]})
-    user_data = {k: v for k, v in user.items() if k != "password"}
-    
-    logger.info(f"✅ Logged in: {data.email}")
-    return {"token": token, "user": user_data}
+    if not user or user["password"] != hash_password(data.password):
+        raise HTTPException(401, "Invalid email or password")
+    token = create_token(user["id"])
+    return {"token": token, "user": {k:v for k,v in user.items() if k!="password"}}
 
 @app.get("/api/users")
-async def get_users(payload=Depends(get_current_user)):
-    return [{k: v for k, v in u.items() if k != "password"} 
-            for u in users_db.values() if u["id"] != payload["id"]]
+async def get_users(authorization: str = Header(None)):
+    payload = verify_token(authorization.split(" ")[1] if authorization else "")
+    if not payload: raise HTTPException(401)
+    return [{k:v for k,v in u.items() if k!="password"} for u in users_db.values() if u["id"]!=payload["user_id"]]
 
 @app.get("/api/chats")
-async def get_chats(payload=Depends(get_current_user)):
+async def get_chats(authorization: str = Header(None)):
+    payload = verify_token(authorization.split(" ")[1] if authorization else "")
+    if not payload: raise HTTPException(401)
     result = []
     for c in chats_db.values():
-        if payload["id"] in c["participants"]:
-            other_id = next((p for p in c["participants"] if p != payload["id"]), None)
+        if payload["user_id"] in c["participants"]:
+            other_id = next((p for p in c["participants"] if p!=payload["user_id"]), None)
             other = users_db.get(other_id, {})
-            result.append({
-                **c,
-                "otherUser": {k: v for k, v in other.items() if k != "password"} if other else None
-            })
-    return sorted(result, key=lambda x: x.get("updatedAt", ""), reverse=True)
+            result.append({**c, "otherUser": {k:v for k,v in other.items() if k!="password"} if other else None})
+    return sorted(result, key=lambda x: x.get("updatedAt",""), reverse=True)
 
 @app.post("/api/chats")
-async def create_chat(data: ChatCreate, payload=Depends(get_current_user)):
-    existing = next((c for c in chats_db.values() 
-                    if payload["id"] in c["participants"] 
-                    and data.participantId in c["participants"]), None)
-    
-    if existing:
-        other = users_db.get(data.participantId, {})
-        return {**existing, "otherUser": {k: v for k, v in other.items() if k != "password"} if other else None}
-    
+async def create_chat(data: ChatCreate, authorization: str = Header(None)):
+    payload = verify_token(authorization.split(" ")[1] if authorization else "")
+    if not payload: raise HTTPException(401)
+    for c in chats_db.values():
+        if payload["user_id"] in c["participants"] and data.participantId in c["participants"]:
+            other = users_db.get(data.participantId, {})
+            return {**c, "otherUser": {k:v for k,v in other.items() if k!="password"} if other else None}
     cid = str(uuid.uuid4())
-    chats_db[cid] = {
-        "id": cid,
-        "participants": [payload["id"], data.participantId],
-        "isGroup": False,
-        "createdAt": datetime.utcnow().isoformat(),
-        "updatedAt": datetime.utcnow().isoformat(),
-        "lastMessage": None
-    }
-    
-    save_data("chats", chats_db)
+    chats_db[cid] = {"id":cid,"participants":[payload["user_id"],data.participantId],"isGroup":False,"createdAt":datetime.utcnow().isoformat(),"updatedAt":datetime.utcnow().isoformat(),"lastMessage":None}
     other = users_db.get(data.participantId, {})
-    return {**chats_db[cid], "otherUser": {k: v for k, v in other.items() if k != "password"} if other else None}
+    return {**chats_db[cid], "otherUser": {k:v for k,v in other.items() if k!="password"} if other else None}
 
 @app.get("/api/messages/{chat_id}")
-async def get_messages(chat_id: str, payload=Depends(get_current_user)):
+async def get_messages(chat_id: str, authorization: str = Header(None)):
+    payload = verify_token(authorization.split(" ")[1] if authorization else "")
+    if not payload: raise HTTPException(401)
     result = []
     for m in messages_db:
-        if m["chatId"] == chat_id:
+        if m["chatId"]==chat_id:
             sender = users_db.get(m["senderId"], {})
-            result.append({**m, "sender": {k: v for k, v in sender.items() if k != "password"} if sender else None})
+            result.append({**m, "sender": {k:v for k,v in sender.items() if k!="password"} if sender else None})
     return sorted(result, key=lambda x: x["timestamp"])
 
 @app.put("/api/users/profile")
-async def update_profile(data: UserUpdate, payload=Depends(get_current_user)):
-    user = users_db.get(payload["id"])
-    if not user:
-        raise HTTPException(404, "User not found")
-    
-    for field in ["name", "email", "bio", "phone", "avatar"]:
-        val = getattr(data, field, None)
-        if val is not None:
-            user[field] = val
-    
-    save_data("users", users_db)
-    return {k: v for k, v in user.items() if k != "password"}
+async def update_profile(data: UserUpdate, authorization: str = Header(None)):
+    payload = verify_token(authorization.split(" ")[1] if authorization else "")
+    if not payload: raise HTTPException(401)
+    u = users_db.get(payload["user_id"])
+    if not u: raise HTTPException(404)
+    for f in ["name","email","bio","phone","avatar"]:
+        v = getattr(data, f, None)
+        if v is not None: u[f] = v
+    return {k:v for k,v in u.items() if k!="password"}
 
 @app.post("/api/users/avatar")
-async def upload_avatar(avatar: UploadFile = File(...), payload=Depends(get_current_user)):
-    try:
-        ext = os.path.splitext(avatar.filename)[1] if avatar.filename else ".jpg"
-        fname = f"{payload['id']}_{uuid.uuid4().hex[:8]}{ext}"
-        fpath = f"uploads/avatars/{fname}"
-        
-        content = await avatar.read()
-        with open(fpath, "wb") as f:
-            f.write(content)
-        
-        url = f"/uploads/avatars/{fname}"
-        if payload["id"] in users_db:
-            users_db[payload["id"]]["avatar"] = url
-            save_data("users", users_db)
-        
-        logger.info(f"📸 Avatar uploaded: {url}")
-        return {"url": url}
-    except Exception as e:
-        logger.error(f"Avatar upload error: {e}")
-        raise HTTPException(500, str(e))
+async def upload_avatar(avatar: UploadFile = File(...), authorization: str = Header(None)):
+    payload = verify_token(authorization.split(" ")[1] if authorization else "")
+    if not payload: raise HTTPException(401)
+    os.makedirs("uploads/avatars", exist_ok=True)
+    ext = os.path.splitext(avatar.filename)[1] if avatar.filename else ".jpg"
+    fname = f"{payload['user_id']}_{uuid.uuid4().hex[:8]}{ext}"
+    with open(f"uploads/avatars/{fname}", "wb") as f:
+        f.write(await avatar.read())
+    url = f"/uploads/avatars/{fname}"
+    if payload["user_id"] in users_db: users_db[payload["user_id"]]["avatar"] = url
+    return {"url": url}
 
-# WebSocket
 @app.websocket("/ws")
-async def websocket_handler(websocket: WebSocket):
+async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
     uid = None
-    
     try:
         while True:
             data = json.loads(await websocket.receive_text())
-            
-            if data.get("type") == "login":
+            if data.get("type")=="login":
                 uid = data["userId"]
                 online_users[uid] = websocket
-                
-                if uid in users_db:
-                    users_db[uid]["online"] = True
-                    users_db[uid]["lastSeen"] = datetime.utcnow().isoformat()
-                    save_data("users", users_db)
-                
-                for u, ws in online_users.items():
-                    if u != uid:
-                        try:
-                            await ws.send_text(json.dumps({"type": "user-status", "userId": uid, "online": True}))
-                        except:
-                            pass
-            
-            elif data.get("type") == "private-message":
-                msg = {
-                    "id": str(uuid.uuid4()),
-                    "chatId": data["chatId"],
-                    "senderId": data["senderId"],
-                    "content": data["content"],
-                    "type": "text",
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "read": False
-                }
-                
+                if uid in users_db: users_db[uid]["online"] = True
+                for u_id, ws in online_users.items():
+                    if u_id!=uid:
+                        try: await ws.send_text(json.dumps({"type":"user-status","userId":uid,"online":True}))
+                        except: pass
+            elif data.get("type")=="private-message":
+                msg = {"id":str(uuid.uuid4()),"chatId":data["chatId"],"senderId":data["senderId"],"content":data["content"],"type":"text","timestamp":datetime.utcnow().isoformat(),"read":False}
                 messages_db.append(msg)
-                save_data("messages", messages_db)
-                
                 if data["chatId"] in chats_db:
                     chats_db[data["chatId"]]["lastMessage"] = msg
                     chats_db[data["chatId"]]["updatedAt"] = datetime.utcnow().isoformat()
-                    save_data("chats", chats_db)
-                
                 sender = users_db.get(data["senderId"], {})
-                msg_sender = {
-                    **msg,
-                    "sender": {k: v for k, v in sender.items() if k != "password"} if sender else None
-                }
-                
+                msg_s = {**msg, "sender": {k:v for k,v in sender.items() if k!="password"} if sender else None}
                 if data["chatId"] in chats_db:
                     for pid in chats_db[data["chatId"]]["participants"]:
-                        if pid != data["senderId"] and pid in online_users:
-                            try:
-                                await online_users[pid].send_text(json.dumps({"type": "private-message", **msg_sender}))
-                            except:
-                                pass
-                
-                await websocket.send_text(json.dumps({"type": "private-message", **msg_sender}))
-                
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+                        if pid!=data["senderId"] and pid in online_users:
+                            try: await online_users[pid].send_text(json.dumps({"type":"private-message",**msg_s}))
+                            except: pass
+                await websocket.send_text(json.dumps({"type":"private-message",**msg_s}))
+    except: pass
     finally:
-        if uid:
-            if uid in online_users:
-                del online_users[uid]
-            if uid in users_db:
-                users_db[uid]["online"] = False
-                users_db[uid]["lastSeen"] = datetime.utcnow().isoformat()
-                save_data("users", users_db)
-            
-            for u, ws in online_users.items():
-                try:
-                    await ws.send_text(json.dumps({"type": "user-status", "userId": uid, "online": False}))
-                except:
-                    pass
+        if uid and uid in online_users:
+            del online_users[uid]
+            if uid in users_db: users_db[uid]["online"] = False
+            for u_id, ws in online_users.items():
+                try: await ws.send_text(json.dumps({"type":"user-status","userId":uid,"online":False}))
+                except: pass
 
-# Запуск
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "5000"))
-    print(f"""
-╔══════════════════════════════════════════╗
-║         🚀 Millow Messenger            ║
-║         Server Starting...             ║
-║         Port: {port}                      ║
-║         Data: data/                    ║
-║         Uploads: uploads/avatars/      ║
-╚══════════════════════════════════════════╝
-    """)
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    print(f"✅ Millow on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
