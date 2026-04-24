@@ -1,7 +1,7 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Header
+from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
 from jose import JWTError, jwt
@@ -10,41 +10,17 @@ from datetime import datetime, timedelta
 import json
 import os
 import uuid
+import sys
 import traceback
-import logging
 
 # Настройка логирования
+import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Создание всех необходимых папок
-REQUIRED_DIRS = [
-    "data",
-    "uploads",
-    "uploads/avatars",
-    "static"
-]
+app = FastAPI(title="Millow Messenger")
 
-for directory in REQUIRED_DIRS:
-    os.makedirs(directory, exist_ok=True)
-    logger.info(f"📁 Created directory: {directory}")
-
-# Создание файлов данных если их нет
-DATA_FILES = {
-    "data/users.json": {},
-    "data/chats.json": {},
-    "data/messages.json": []
-}
-
-for filepath, default_value in DATA_FILES.items():
-    if not os.path.exists(filepath):
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(default_value, f, indent=2)
-        logger.info(f"📄 Created file: {filepath}")
-
-app = FastAPI(title="Millow Messenger API")
-
-# CORS - разрешаем всё
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -53,14 +29,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Настройки безопасности
-SECRET_KEY = os.getenv("JWT_SECRET", "millow_secret_key_2024_super_secure")
+# Конфигурация
+SECRET_KEY = os.getenv("JWT_SECRET", "millow_secret_key_2024")
 ALGORITHM = "HS256"
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Монтируем статические папки
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Проверка bcrypt
+try:
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    # Тест хеширования
+    test_hash = pwd_context.hash("test")
+    logger.info("✅ Bcrypt working")
+except Exception as e:
+    logger.error(f"❌ Bcrypt error: {e}")
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Создание папок
+for directory in ["data", "uploads", "uploads/avatars", "static"]:
+    os.makedirs(directory, exist_ok=True)
+    logger.info(f"📁 Directory ready: {directory}")
+
+# Загрузка или создание файлов данных
+def load_json(filename, default={}):
+    filepath = f"data/{filename}.json"
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading {filename}: {e}")
+    
+    # Создаем файл если не существует
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(default, f, indent=2)
+    return default
+
+def save_json(filename, data):
+    try:
+        filepath = f"data/{filename}.json"
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, default=str)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving {filename}: {e}")
+        return False
+
+# Инициализация данных
+users_db = load_json("users", {})
+chats_db = load_json("chats", {})
+messages_db = load_json("messages", [])
+online_users = {}
+
+logger.info(f"📊 Loaded: {len(users_db)} users, {len(chats_db)} chats, {len(messages_db)} messages")
+
+# Монтирование статических файлов
+try:
+    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+except Exception as e:
+    logger.error(f"Error mounting static files: {e}")
 
 # ============ Функции для работы с файлами ============
 
